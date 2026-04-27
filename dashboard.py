@@ -181,9 +181,9 @@ def sheets_save(data):
         return False
 
 DEFAULT_BRANDS = {
-    "nidec": "Motor", "reb30": "Motor", "reb60": "Motor",
-    "mgm": "ESC", "elmo": "ESC",
-    "hilex": "Prop", "helix": "Prop", "e-prop": "Prop", "eprop": "Prop",
+    "Nidec": "Motor", "REB30": "Motor", "REB60": "Motor",
+    "MGM": "ESC", "Elmo120A": "ESC",
+    "Helix": "Prop", "E-Prop": "Prop",
 }
 
 # ─── DATA HELPERS ──────────────────────────────────────────────────────────────
@@ -203,6 +203,18 @@ def _ensure_keys(d):
     for k, v in DEFAULTS.items():
         if k not in d:
             d[k] = v if not isinstance(v, dict) else v.copy()
+    # Migrate brands: replace old lowercase keys with capitalised DEFAULT_BRANDS
+    saved_brands = d.get("brands", {})
+    merged = {}
+    for b, t in saved_brands.items():
+        # Find matching DEFAULT_BRANDS key (case-insensitive)
+        match = next((db for db in DEFAULT_BRANDS if db.lower() == b.lower()), None)
+        merged[match if match else b] = DEFAULT_BRANDS.get(match, t)
+    # Add any DEFAULT_BRANDS keys not yet present
+    for b, t in DEFAULT_BRANDS.items():
+        if b not in merged:
+            merged[b] = t
+    d["brands"] = merged
     return d
 
 def load_data():
@@ -320,9 +332,23 @@ def month_range():
 
 # ─── MANUFACTURER HELPERS ──────────────────────────────────────────────────────
 
-def get_manufacturer(comp_name):
-    """Extract brand name from component name like 'Nidec_FX124' → 'Nidec'"""
-    return comp_name.split("_")[0] if "_" in comp_name else comp_name
+def get_manufacturer(comp_name, brands=None):
+    """
+    Extract brand from component name.
+    Tries underscore split first (e.g. Nidec_FX124 → Nidec),
+    then checks known brands list for a prefix match,
+    then falls back to first word.
+    """
+    # underscore convention
+    if "_" in comp_name:
+        return comp_name.split("_")[0]
+    # check known brands — longest match wins
+    if brands:
+        matches = [b for b in brands if comp_name.lower().startswith(b.lower())]
+        if matches:
+            return max(matches, key=len)
+    # fallback: first word
+    return comp_name.split()[0] if " " in comp_name else comp_name
 
 def build_manufacturer_chart_data(data):
     """Build chart rows grouped by manufacturer + type"""
@@ -910,50 +936,29 @@ if page("Overview"):
           <div style="font-size:13px;color:#639922;font-weight:600;">All clear ✓</div>
         </div>""", unsafe_allow_html=True)
 
-    # ── Component lifetime KPIs ───────────────────────────────────────────────
-    st.markdown("<br>", unsafe_allow_html=True)
-    motor_h = sum(get_comp_hours(c["id"], all_sessions)
-                  for c in data["components"] if c["type"] == "Motor")
-    esc_h   = sum(get_comp_hours(c["id"], all_sessions)
-                  for c in data["components"] if c["type"] == "ESC")
-    prop_h  = sum(get_comp_hours(c["id"], all_sessions)
-                  for c in data["components"] if c["type"] == "Prop")
-    lk1, lk2, lk3 = st.columns(3)
-    for col, lbl, val in [(lk1, "ALL MOTORS", motor_h),
-                          (lk2, "ALL ESCs",   esc_h),
-                          (lk3, "ALL PROPS",  prop_h)]:
-        col.markdown(f"""<div class="kpi-card">
-          <div class="kpi-value">{fmt_dur(val)}</div>
-          <div class="kpi-label">{lbl} — TOTAL HOURS</div>
-        </div>""", unsafe_allow_html=True)
-
     st.markdown("<br>", unsafe_allow_html=True)
 
-    left_col, right_col = st.columns([3, 2])
+    # ── Row: Two charts side by side ──────────────────────────────────────────
+    chart_left, chart_right = st.columns(2)
 
-    # ── Left: Line chart by month ─────────────────────────────────────────────
-    with left_col:
+    import plotly.graph_objects as go
+    from collections import defaultdict
+
+    def hours_to_hhmm(h):
+        total_sec = int(round(h * 3600))
+        hh = total_sec // 3600
+        mm = (total_sec % 3600) // 60
+        return f"{hh:02d}:{mm:02d}"
+
+    with chart_left:
         st.markdown("#### Run time over time")
-
-        import plotly.graph_objects as go
-        from collections import defaultdict
-
-        def hours_to_hhmm(h):
-            total_sec = int(round(h * 3600))
-            hh = total_sec // 3600
-            mm = (total_sec % 3600) // 60
-            return f"{hh:02d}:{mm:02d}"
-
-        # Aggregate by month (YYYY-MM)
         month_totals = defaultdict(float)
         for s in all_sessions:
-            ts = s.get("timestamp", "")[:7]  # "YYYY-MM"
+            ts = s.get("timestamp", "")[:7]
             if ts and len(ts) == 7:
                 month_totals[ts] += s["hours"]
-
         if month_totals:
             sorted_months = sorted(month_totals.keys())
-            # Pretty x labels: "Apr 2026"
             def month_label(ym):
                 try:
                     dt = datetime.strptime(ym, "%Y-%m")
@@ -962,57 +967,71 @@ if page("Overview"):
                     return ym
             x_labels = [month_label(m) for m in sorted_months]
             y_vals   = [month_totals[m] for m in sorted_months]
-
             fig = go.Figure()
             fig.add_trace(go.Scatter(
-                x=x_labels,
-                y=y_vals,
+                x=x_labels, y=y_vals,
                 mode="lines+markers",
                 line=dict(color="#111111", width=2.5),
                 marker=dict(size=6, color="#111111"),
                 hovertemplate="%{x}<br><b>%{customdata}</b><extra></extra>",
                 customdata=[hours_to_hhmm(h) for h in y_vals],
-                fill="tozeroy",
-                fillcolor="rgba(17,17,17,0.05)",
+                fill="tozeroy", fillcolor="rgba(17,17,17,0.05)",
             ))
-            # Y-axis ticks: show clean HH:MM labels
             max_h = max(y_vals) if y_vals else 1
             step  = max(max_h / 5, 1/60)
             tick_vals = [round(i * step, 4) for i in range(6)]
-            tick_text = [hours_to_hhmm(v) for v in tick_vals]
-
             fig.update_layout(
-                height=280,
-                margin=dict(l=10, r=10, t=10, b=10),
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="#f9f9f7",
-                xaxis=dict(
-                    showgrid=False,
-                    tickfont=dict(size=11),
-                    tickangle=0,
-                    fixedrange=True,
-                ),
-                yaxis=dict(
-                    showgrid=True,
-                    gridcolor="#e8e8e6",
-                    tickfont=dict(size=11),
-                    tickvals=tick_vals,
-                    ticktext=tick_text,
-                    title=None,
-                    fixedrange=True,
-                    rangemode="tozero",
-                ),
+                height=260, margin=dict(l=10, r=10, t=10, b=10),
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#f9f9f7",
+                xaxis=dict(showgrid=False, tickfont=dict(size=11), fixedrange=True),
+                yaxis=dict(showgrid=True, gridcolor="#e8e8e6", tickfont=dict(size=11),
+                           tickvals=tick_vals, ticktext=[hours_to_hhmm(v) for v in tick_vals],
+                           title=None, fixedrange=True, rangemode="tozero"),
                 showlegend=False,
             )
             st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
         else:
             st.info("No session data to chart yet.")
 
-    # ── Right: Rig config + Event log ─────────────────────────────────────────
-    with right_col:
-        # Rig config — dual A/B
+    with chart_right:
+        st.markdown("#### Top 5 setups")
+        _setup_hours = defaultdict(float)
+        for _s in all_sessions:
+            _m = _e = _p = "—"
+            for _cid in _s.get("components", []):
+                _c = next((x for x in data["components"] if x["id"] == _cid), None)
+                if not _c: continue
+                _b = get_manufacturer(_c["name"])
+                if _c["type"] == "Motor": _m = _b
+                elif _c["type"] == "ESC": _e = _b
+                elif _c["type"] == "Prop": _p = _b
+            _setup_hours[f"{_m} / {_e} / {_p}"] += _s["hours"]
+        if _setup_hours:
+            _top5 = sorted(_setup_hours.items(), key=lambda x: -x[1])[:5]
+            _fig5 = go.Figure(go.Bar(
+                y=[t[0] for t in _top5], x=[t[1] for t in _top5],
+                orientation="h",
+                marker_color=["#111","#444","#777","#aaa","#ccc"][:len(_top5)],
+                hovertemplate="%{y}<br>%{customdata}<extra></extra>",
+                customdata=[fmt_dur(v) for _,v in _top5],
+            ))
+            _fig5.update_layout(
+                height=260, margin=dict(t=0, b=10, l=0, r=10),
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#f9f9f7",
+                xaxis=dict(showgrid=True, gridcolor="#e8e8e6", title=None, tickfont_size=10),
+                yaxis=dict(showgrid=False, tickfont_size=10, autorange="reversed"),
+            )
+            st.plotly_chart(_fig5, use_container_width=True,
+                            config={"displayModeBar":False}, key="ov_top5_chart")
+        else:
+            st.caption("No session data yet.")
+
+    # ── Row: Rig config + Event log side by side ──────────────────────────────
+    st.markdown("<br>", unsafe_allow_html=True)
+    rig_col, event_col = st.columns(2)
+
+    with rig_col:
         active = data.get("active_side","Side A")
-        active_color = "#e85d00" if active=="Both" else "#111"
         st.markdown(f"""
         <div style="margin-bottom:8px;">
           <span style="font-size:15px;font-weight:600;">Current rig configuration</span>
@@ -1027,15 +1046,14 @@ if page("Overview"):
         def render_cfg_display(cfg):
             display_fields = [
                 ("Motor",   cfg.get("Motor",""),   None),
-                ("ESC",   cfg.get("ESC",""),     cfg.get("ESC_role","")),
-                ("ESC",   cfg.get("ESC2",""),    cfg.get("ESC2_role","")),
+                ("ESC",     cfg.get("ESC",""),     cfg.get("ESC_role","")),
+                ("ESC",     cfg.get("ESC2",""),    cfg.get("ESC2_role","")),
                 ("Prop",    cfg.get("Prop",""),    None),
                 ("Prop",    cfg.get("Prop2",""),   None),
                 ("Battery", cfg.get("Battery",""), None),
             ]
             for label, val, role in display_fields:
-                if not val:
-                    continue
+                if not val: continue
                 role_tag = (f" <span style='font-size:10px;background:#eee;padding:1px 5px;"
                             f"border-radius:2px;'>{role}</span>") if role else ""
                 st.markdown(
@@ -1049,7 +1067,7 @@ if page("Overview"):
                         unsafe_allow_html=True)
 
         if not cfg_a and not cfg_b:
-            st.caption("No configuration set. Add it in the Input tab.")
+            st.caption("No configuration set. Add it in Rig configuration.")
         else:
             ra, rb = st.columns(2)
             with ra:
@@ -1059,19 +1077,17 @@ if page("Overview"):
                 st.markdown("**Side B**")
                 render_cfg_display(cfg_b)
 
-        st.markdown("<br>", unsafe_allow_html=True)
-
-        # Event log
+    with event_col:
         st.markdown("#### Event log")
         events = sorted(data.get("events", []),
                         key=lambda x: x.get("timestamp",""), reverse=True)
         if not events:
-            st.caption("No events logged. Add them in the Input tab.")
+            st.caption("No events logged. Add them in Log events.")
         else:
             for ev in events[:8]:
-                sev   = ev.get("severity", "info")
-                ts    = ev.get("timestamp","")[:16].replace("T"," ")
-                txt   = ev.get("text","")
+                sev = ev.get("severity", "info")
+                ts  = ev.get("timestamp","")[:16].replace("T"," ")
+                txt = ev.get("text","")
                 st.markdown(f"""
                 <div class="ev-{sev}">
                   <span style="font-size:11px;color:#888;">{ts}</span>
@@ -1164,7 +1180,21 @@ if page("Dashboard"):
 
     # ── Helper: get brand from component name (first token) ───────────────────
     def brand_of(name):
-        return name.split("_")[0] if "_" in name else name
+        """
+        Extract brand/model for grouping.
+        - underscore names (Nidec_FX124) → first token: Nidec
+        - space names (Elmo120A GDR26125020) → drop last token if it looks like a serial
+          (contains digits), keep the rest: Elmo120A
+        """
+        if "_" in name:
+            return name.split("_")[0]
+        parts = name.split()
+        if len(parts) > 1:
+            # if last part looks like a serial (contains digits), drop it
+            import re
+            if re.search(r"\d", parts[-1]):
+                return " ".join(parts[:-1])
+        return name
 
     # ── Helper: build brand→hours for a given component type ─────────────────
     def brand_hours(comp_type):
@@ -1202,6 +1232,19 @@ if page("Dashboard"):
     if alert_comps:
         if st.button("View component alerts", key="db_alert_btn"):
             st.session_state.goto_components = True
+
+    # ── Component lifetime KPIs ───────────────────────────────────────────────
+    st.markdown("<br>", unsafe_allow_html=True)
+    _db_all = data["sessions"]
+    _mot_h = sum(get_comp_hours(c["id"], _db_all) for c in data["components"] if c["type"]=="Motor")
+    _esc_h = sum(get_comp_hours(c["id"], _db_all) for c in data["components"] if c["type"]=="ESC")
+    _prp_h = sum(get_comp_hours(c["id"], _db_all) for c in data["components"] if c["type"]=="Prop")
+    lk1, lk2, lk3 = st.columns(3)
+    for _col, _lbl, _val in [(lk1,"ALL MOTORS",_mot_h),(lk2,"ALL ESCs",_esc_h),(lk3,"ALL PROPS",_prp_h)]:
+        _col.markdown(f"""<div class="kpi-card">
+          <div class="kpi-value">{fmt_dur(_val)}</div>
+          <div class="kpi-label">{_lbl} — TOTAL HOURS</div>
+        </div>""", unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -1265,47 +1308,8 @@ if page("Dashboard"):
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # ── Row B: Top 5 setups + Rig utilisation ────────────────────────────────
-    col_top5, col_rig = st.columns([3, 2])
-
-    with col_top5:
-        st.subheader("Top 5 setups")
-        setup_hours = defaultdict(float)
-        for s in all_sessions:
-            motor_brand = esc_brand = prop_brand = "—"
-            for cid in s.get("components", []):
-                c = next((x for x in all_comps if x["id"] == cid), None)
-                if not c: continue
-                b = brand_of(c["name"])
-                if c["type"] == "Motor": motor_brand = b
-                elif c["type"] == "ESC": esc_brand   = b
-                elif c["type"] == "Prop": prop_brand = b
-            key = f"{motor_brand} / {esc_brand} / {prop_brand}"
-            setup_hours[key] += s["hours"]
-
-        if setup_hours:
-            top5 = sorted(setup_hours.items(), key=lambda x: -x[1])[:5]
-            labels = [t[0] for t in top5]
-            values = [t[1] for t in top5]
-            fig_top5 = go.Figure(go.Bar(
-                y=labels, x=values,
-                orientation="h",
-                marker_color=CHART_COLORS[:len(labels)],
-                hovertemplate="%{y}<br>%{customdata}<extra></extra>",
-                customdata=[fmt_dur(v) for v in values],
-            ))
-            fig_top5.update_layout(
-                height=240, margin=dict(t=0,b=10,l=0,r=10),
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="#f9f9f7",
-                xaxis=dict(showgrid=True, gridcolor="#e8e8e6", title=None, tickfont_size=10),
-                yaxis=dict(showgrid=False, tickfont_size=10, autorange="reversed"),
-            )
-            st.plotly_chart(fig_top5, use_container_width=True,
-                            config={"displayModeBar":False}, key="top5_chart")
-        else:
-            st.caption("No session data yet.")
-
+    # ── Row B: Rig utilisation ───────────────────────────────────────────────
+    col_rig, _ = st.columns([2, 3])
     with col_rig:
         st.subheader("Rig utilisation")
         side_a_h = sum(s["hours"] for s in all_sessions if s.get("side") in ("Side A","Both"))
@@ -1405,20 +1409,37 @@ if page("Dashboard"):
 if page("Log session"):
     st.subheader("Log a session manually")
     with st.expander("+ Add a new component"):
-        qc1,qc2,qc3 = st.columns([1,2,1])
-        q_type  = qc1.selectbox("Type",["Motor","ESC","Prop","Battery"],key="q_type")
-        q_name  = qc2.text_input("Name / ID",placeholder="e.g. Nidec_FX124",key="q_name")
-        q_limit = qc3.number_input("Max hours",min_value=0.0,step=1.0,value=50.0,key="q_limit")
-        if st.button("Add component",key="q_add"):
-            if not q_name.strip():
-                st.error("Please enter a name.")
+        lc1, lc2, lc3, lc4 = st.columns([1.2, 1.5, 1.5, 1])
+        q_type  = lc1.selectbox("Type", ["Motor","ESC","Prop","Battery"], key="q_type")
+        _lb     = data.get("brands", DEFAULT_BRANDS.copy())
+        _lblist = sorted([b for b,t in _lb.items() if t == q_type])
+        q_brand = lc2.selectbox("Brand", [""] + _lblist + ["Other (type below)"], key="q_brand")
+        q_serial = lc3.text_input(
+            "Brand name" if q_brand == "Other (type below)" else "Serial number",
+            placeholder="Brand name" if q_brand == "Other (type below)" else "e.g. GDR26125020",
+            key="q_serial")
+        q_limit = lc4.number_input("Max hours", min_value=0.0, step=1.0, value=50.0, key="q_limit")
+        if st.button("Add component", key="q_add"):
+            _fb = q_serial.strip() if q_brand == "Other (type below)" else q_brand
+            _fs = "" if q_brand == "Other (type below)" else q_serial.strip()
+            if not _fb:
+                st.error("Please select or enter a brand.")
             else:
-                data["components"].append({"id":f"{q_type}_{datetime.now().timestamp():.0f}",
-                    "type":q_type,"name":q_name.strip(),
-                    "limit":q_limit if q_limit>0 else None})
-                save_data(data); st.session_state.data=data
-                st.session_state["added_msg"] = f"Added {q_type}: {q_name}"
-                st.rerun()
+                q_name = f"{_fb}_{_fs}" if _fs else _fb
+                if any(c["name"].lower() == q_name.lower() for c in data["components"]):
+                    st.warning(f"{q_name} already exists.")
+                else:
+                    _new_id = (f"{q_type.lower()}_{_fb.lower()}_{_fs.lower()}"
+                               if _fs else f"{q_type.lower()}_{_fb.lower()}_{datetime.now().timestamp():.0f}")
+                    if _fb not in _lb:
+                        _lb[_fb] = q_type; data["brands"] = _lb
+                    data["components"].append({
+                        "id": _new_id, "type": q_type, "name": q_name,
+                        "limit": q_limit if q_limit > 0 else None
+                    })
+                    save_data(data); st.session_state.data = data
+                    st.session_state["added_msg"] = f"Added {q_type}: {q_name}"
+                    st.rerun()
 
     if "added_msg" in st.session_state:
         st.success(st.session_state.pop("added_msg"))
@@ -1649,18 +1670,44 @@ if page("Components"):
             bar_color = "#639922" if s_key=="ok" else "#EF9F27" if s_key=="warning" else "#E24B4A"
             is_editing = st.session_state.editing_comp_id==comp["id"]
             if is_editing:
-                e1,e2,e3,e4 = st.columns([2.5,1.5,0.9,0.9])
-                new_name = e1.text_input("Name",value=comp["name"],key=f"edit_name_{comp['id']}",label_visibility="collapsed")
-                opts = ["Motor","ESC","Prop","Battery"]
-                new_type = e2.selectbox("Type",opts,index=opts.index(comp["type"]) if comp["type"] in opts else 0,
-                    key=f"edit_type_{comp['id']}",label_visibility="collapsed")
-                if e3.button("Save name",key=f"save_name_{comp['id']}"):
-                    if new_name.strip():
-                        comp["name"]=new_name.strip(); comp["type"]=new_type
-                        save_data(data); st.session_state.data=data
-                        st.session_state.editing_comp_id=None; st.rerun()
-                if e4.button("Cancel",key=f"cancel_edit_{comp['id']}"):
-                    st.session_state.editing_comp_id=None; st.rerun()
+                # Parse existing name into brand + serial
+                _parts = comp["name"].split("_", 1)
+                _cur_brand  = _parts[0] if len(_parts) >= 1 else comp["name"]
+                _cur_serial = _parts[1] if len(_parts) == 2 else ""
+
+                _brands_dict  = data.get("brands", DEFAULT_BRANDS.copy())
+                _type_brands  = sorted([b for b,t in _brands_dict.items() if t == comp["type"]])
+                _brand_opts   = _type_brands + ["Other (type below)"]
+                _brand_idx    = _brand_opts.index(_cur_brand) if _cur_brand in _brand_opts else len(_brand_opts)-1
+
+                ea, eb, ec, ed2, ee = st.columns([1.5, 1.5, 1.5, 0.9, 0.9])
+                new_type = ea.selectbox("Type", ["Motor","ESC","Prop","Battery"],
+                    index=["Motor","ESC","Prop","Battery"].index(comp["type"]),
+                    key=f"edit_type_{comp['id']}", label_visibility="collapsed")
+                new_brand = eb.selectbox("Brand", _brand_opts,
+                    index=_brand_idx,
+                    key=f"edit_brand_{comp['id']}", label_visibility="collapsed")
+                new_serial = ec.text_input(
+                    "Serial" if new_brand != "Other (type below)" else "Brand name",
+                    value=_cur_serial if new_brand != "Other (type below)" else _cur_brand,
+                    key=f"edit_serial_{comp['id']}", label_visibility="collapsed",
+                    placeholder="Serial number")
+                if ed2.button("Save", key=f"save_name_{comp['id']}"):
+                    if new_brand == "Other (type below)":
+                        _fb = new_serial.strip(); _fs = ""
+                    else:
+                        _fb = new_brand; _fs = new_serial.strip()
+                    if _fb:
+                        comp["name"] = f"{_fb}_{_fs}" if _fs else _fb
+                        comp["type"] = new_type
+                        # Add new brand to brands dict if not known
+                        if _fb not in _brands_dict:
+                            _brands_dict[_fb] = new_type
+                            data["brands"] = _brands_dict
+                        save_data(data); st.session_state.data = data
+                        st.session_state.editing_comp_id = None; st.rerun()
+                if ee.button("Cancel", key=f"cancel_edit_{comp['id']}"):
+                    st.session_state.editing_comp_id = None; st.rerun()
             else:
                 b,l,sv,ed,rm = st.columns([3.5,1.2,0.9,0.8,0.8])
                 with b:
@@ -1708,17 +1755,17 @@ if page("Rig configuration"):
 
     # ── Inline add-new-component form ─────────────────────────────────────
     with st.expander("+ Add a new component"):
-        qc1, qc2 = st.columns(2)
-        q_type   = qc1.selectbox("Type", ["Motor","ESC","Prop","Battery"], key="rig_q_type")
-        q_limit  = qc2.number_input("Hour limit", min_value=0, value=100, step=10, key="rig_q_limit")
-        brands     = data.get("brands", DEFAULT_BRANDS.copy())
-        type_brands_rig = sorted([b for b,t in brands.items() if t == q_type])
-        qc3, qc4 = st.columns(2)
-        q_brand  = qc3.selectbox("Brand", [""] + type_brands_rig + ["Other (type below)"], key="rig_q_brand")
-        q_serial = qc4.text_input(
-            "Brand (if Other)" if q_brand == "Other (type below)" else "Serial number",
-            placeholder="Brand name" if q_brand == "Other (type below)" else "e.g. FX124",
+        rq1, rq2, rq3, rq4 = st.columns([1.2, 1.5, 1.5, 1])
+        q_type  = rq1.selectbox("Type", ["Motor","ESC","Prop","Battery"], key="rig_q_type")
+        brands_rig = data.get("brands", DEFAULT_BRANDS.copy())
+        type_brands_rig = sorted([b for b,t in brands_rig.items() if t == q_type])
+        q_brand = rq2.selectbox("Brand", [""] + type_brands_rig + ["Other (type below)"],
+                                key="rig_q_brand")
+        q_serial = rq3.text_input(
+            "Brand name" if q_brand == "Other (type below)" else "Serial number",
+            placeholder="Brand name" if q_brand == "Other (type below)" else "e.g. GDR26125020",
             key="rig_q_serial")
+        q_limit = rq4.number_input("Hour limit", min_value=0, value=100, step=10, key="rig_q_limit")
         if st.button("Add component", key="rig_add_comp"):
             if q_brand == "Other (type below)":
                 final_brand = q_serial.strip(); final_serial = ""
@@ -1735,6 +1782,10 @@ if page("Rig configuration"):
                     new_id = (f"{q_type.lower()}_{final_brand.lower()}_{final_serial.lower()}"
                               if final_serial else
                               f"{q_type.lower()}_{final_brand.lower()}_{datetime.now().timestamp():.0f}")
+                    # Auto-add new brand to brands dict
+                    if final_brand not in brands_rig:
+                        brands_rig[final_brand] = q_type
+                        data["brands"] = brands_rig
                     data["components"].append({
                         "id": new_id, "name": new_name, "type": q_type,
                         "hours": 0.0, "sessions": 0,
