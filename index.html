@@ -341,7 +341,8 @@ function SvgHBar({ data, height=220 }) {
 // CONFIG
 // ═══════════════════════════════════════════════════════════════════
 const SHEET_ID   = "1btpyqWJaLl9YeelLbuvlJJilLBzCwWidSs_fGxQ-W8k";
-const OP_PASS    = "air2024";   // change this to your preferred password
+const OP_PASS    = "air2024";
+const DEFAULT_PROXY = "https://script.google.com/a/macros/airev.aero/s/AKfycbwuI2efaWy3Bcc_K7XmEzAuBoharviwZFcCGK7E1t3f0u/exec";
 const PUB_PAGES  = ["Overview","Dashboard"];
 const PROT_PAGES = ["Live timer run","Log past session","Log book","Components",
                     "Rig configuration","Log events","Settings"];
@@ -494,9 +495,9 @@ function App() {
     const freshCfg = (() => {
       try { return JSON.parse(localStorage.getItem("tbCfg")||"{}"); } catch { return {}; }
     })();
-    if (!freshCfg.proxyUrl) { setSync("err"); showToast("No proxy URL set in Settings"); return; }
+    const proxyUrl = freshCfg.proxyUrl || DEFAULT_PROXY;
     setSync("busy");
-    const d = await SheetsAPI.read(freshCfg.proxyUrl);
+    const d = await SheetsAPI.read(proxyUrl);
     if (d) {
       localStorage.setItem(LOCAL_KEY, JSON.stringify(d));
       setData(d);
@@ -518,7 +519,7 @@ function App() {
     // Show sync status — don't auto-load from Sheets on startup
     // (prevents Sheets from overwriting local unsaved changes)
     const cfg0 = (() => { try { return JSON.parse(localStorage.getItem("tbCfg")||"{}"); } catch { return {}; } })();
-    setSync(cfg0.proxyUrl ? "ok" : "err");
+    setSync("ok"); // proxy always available via DEFAULT_PROXY
   }, []);
 
   // ── Save helper ───────────────────────────────────────────────────
@@ -536,10 +537,11 @@ function App() {
     const freshCfg = (() => {
       try { return JSON.parse(localStorage.getItem("tbCfg")||"{}"); } catch { return {}; }
     })();
-    if (freshCfg.proxyUrl) {
+    const proxyUrl = freshCfg.proxyUrl || DEFAULT_PROXY;
+    if (proxyUrl) {
       setSync("busy");
       try {
-        const result = await SheetsAPI.write(newData, freshCfg.proxyUrl, OP_PASS);
+        const result = await SheetsAPI.write(newData, proxyUrl, OP_PASS);
         if (result === true) {
           setSync("ok");
         } else if (result === "forbidden") {
@@ -887,8 +889,50 @@ function PageOverview({ data }) {
 // ═══════════════════════════════════════════════════════════════════
 function PageDashboard({ data }) {
   const { sessions=[], components=[] } = data;
+  const now = new Date();
+  const monStr  = now.toISOString().slice(0,7);
+  const wkStart = (() => { const d=new Date(now); d.setDate(d.getDate()-d.getDay()); d.setHours(0,0,0,0); return d; })();
 
-  // ── CompTable: clean table showing name + hours, sorted by hours desc ──
+  const monSess  = sessions.filter(s=>(s.timestamp||"").slice(0,7)===monStr);
+  const weekSess = sessions.filter(s=>new Date(s.timestamp||0)>=wkStart);
+
+  // ── KPI calculations ──────────────────────────────────────────────
+  const totalTests  = sessions.length;
+  const monthTests  = monSess.length;
+  const passCount   = sessions.filter(s=>s.outcome==="Success"||!s.outcome).length;
+  const passRate    = totalTests>0 ? Math.round((passCount/totalTests)*100) : 0;
+  const activeDays  = new Set(monSess.map(s=>(s.timestamp||"").slice(0,10))).size;
+  const compsTested = new Set(monSess.flatMap(s=>s.components||[])).size;
+
+  // ── Tests by type table ───────────────────────────────────────────
+  const typeMap = {};
+  sessions.forEach(s=>{
+    const t = s.test_type||"Unspecified";
+    if (!typeMap[t]) typeMap[t] = {total:0,totalH:0,week:0,weekH:0,pass:0,fail:0};
+    typeMap[t].total++;
+    typeMap[t].totalH += s.hours||0;
+    if (s.outcome==="Success"||!s.outcome) typeMap[t].pass++;
+    else typeMap[t].fail++;
+    if (new Date(s.timestamp||0)>=wkStart) {
+      typeMap[t].week++;
+      typeMap[t].weekH += s.hours||0;
+    }
+  });
+  const typeRows = Object.entries(typeMap).sort((a,b)=>b[1].total-a[1].total);
+
+  // ── Activity calendar (current month) ────────────────────────────
+  const daysInMonth = new Date(now.getFullYear(), now.getMonth()+1, 0).getDate();
+  const firstDay    = new Date(now.getFullYear(), now.getMonth(), 1).getDay();
+  const activeDaySet= new Set(monSess.map(s=>(s.timestamp||"").slice(0,10)));
+
+  // ── Outcomes ─────────────────────────────────────────────────────
+  const outMap = {};
+  sessions.forEach(s=>{ const o=s.outcome||"Success"; outMap[o]=(outMap[o]||0)+1; });
+  const outRows = Object.entries(outMap).sort((a,b)=>b[1]-a[1]);
+  const OUT_COLORS = {Success:"var(--ok)","Hardware Failure":"var(--danger)",
+    "User Abort":"var(--warn)","Inconclusive":"#888",Other:"#888"};
+
+  // ── Component hours table ─────────────────────────────────────────
   const CompTable = ({ title, rows }) => (
     <div>
       <div style={{fontSize:10,fontWeight:700,textTransform:"uppercase",
@@ -899,10 +943,10 @@ function PageDashboard({ data }) {
             <tbody>
               {rows.map((r,i)=>(
                 <tr key={i} style={{borderBottom:"0.5px solid var(--border)"}}>
-                  <td style={{padding:"7px 0",fontSize:12,color:"var(--text)",
-                    maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",
-                    whiteSpace:"nowrap"}} title={r.name}>{r.name}</td>
-                  <td style={{padding:"7px 0",fontSize:12,fontWeight:600,
+                  <td style={{padding:"6px 0",fontSize:11,color:"var(--text)",
+                    overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",
+                    maxWidth:140}} title={r.name}>{r.name}</td>
+                  <td style={{padding:"6px 0",fontSize:11,fontWeight:600,
                     fontVariantNumeric:"tabular-nums",color:"var(--text)",
                     textAlign:"right",whiteSpace:"nowrap"}}>{fmtDur(r.h)}</td>
                 </tr>
@@ -911,111 +955,168 @@ function PageDashboard({ data }) {
           </table>}
     </div>
   );
-
-  // ── StatList: breakdown with percentage (for outcomes/rig) ────────
-  const StatList = ({ title, rows }) => {
-    const total = (rows||[]).reduce((a,r)=>a+r.h,0);
-    return (
-      <div className="card">
-        <div className="card-title">{title}</div>
-        {!rows||rows.length===0
-          ? <div className="empty">No data</div>
-          : rows.map((r,i)=>(
-            <div key={i} style={{display:"flex",alignItems:"center",
-              gap:10,marginBottom:7,fontSize:12}}>
-              <div style={{width:7,height:7,borderRadius:1,flexShrink:0,
-                background:["var(--text)","#555","#888","#aaa","#ccc"][i%5]}}/>
-              <span style={{flex:1,color:"var(--text2)",overflow:"hidden",
-                textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={r.name}>{r.name}</span>
-              <span style={{color:"var(--text3)",fontSize:11,minWidth:28,textAlign:"right"}}>
-                {total>0?Math.round((r.h/total)*100):0}%</span>
-              <span style={{fontVariantNumeric:"tabular-nums",fontWeight:600,
-                color:"var(--text)",minWidth:52,textAlign:"right"}}>{fmtDur(r.h)}</span>
-            </div>
-          ))}
-      </div>
-    );
-  };
-
-  // ── INDIVIDUAL component hours (each physical component) ─────────
-  // Rule: each component gets its own hours regardless of pairing.
-  // e.g. if ELMO1 + ELMO2 both run in a 1h session → each gets +1h.
   const compRows = type => components
     .filter(c=>c.type===type)
-    .map(c=>({ name:c.name, h:compHours(c.id,sessions) }))
-    .filter(r=>r.h>0)
-    .sort((a,b)=>b.h-a.h);
-
-  // ── BRAND aggregate hours (no double-counting) ────────────────────
-  // Rule: for each session, count its duration ONCE per brand,
-  // even if multiple components of that brand ran simultaneously.
-  const brandAggHrs = type => {
-    const m={};
-    sessions.forEach(s=>{
-      // Get unique brands used in this session for this component type
-      const brandsThisSession = new Set();
-      (s.components||[]).forEach(cid=>{
-        const c=components.find(x=>x.id===cid);
-        if(c&&c.type===type) brandsThisSession.add(brandOf(c.name));
-      });
-      // Add session hours once per brand (not once per component)
-      brandsThisSession.forEach(b=>{ m[b]=(m[b]||0)+(s.hours||0); });
-    });
-    return Object.entries(m).map(([name,h])=>({name,h})).sort((a,b)=>b.h-a.h);
-  };
-
-  // ── RIG utilisation (no double-counting) ─────────────────────────
-  // Rule: count each session once per side, not per component.
-  const rigMap={};
-  sessions.forEach(s=>{
-    const sd=s.side||"";
-    if(sd==="Side A"||sd==="Both") rigMap["Side A"]=(rigMap["Side A"]||0)+(s.hours||0);
-    if(sd==="Side B"||sd==="Both") rigMap["Side B"]=(rigMap["Side B"]||0)+(s.hours||0);
-    if(!sd||sd==="manual")         rigMap["Unattributed"]=(rigMap["Unattributed"]||0)+(s.hours||0);
-  });
-  const rigRows=Object.entries(rigMap).filter(([,h])=>h>0)
-    .map(([name,h])=>({name,h})).sort((a,b)=>b.h-a.h);
-
-  // ── Outcomes & test types (session-based, no double-counting) ─────
-  const aggBySess = key => {
-    const m={};
-    sessions.forEach(s=>{ const k=s[key]||"Unspecified"; m[k]=(m[k]||0)+(s.hours||0); });
-    return Object.entries(m).map(([name,h])=>({name,h})).sort((a,b)=>b.h-a.h);
-  };
-
-  // ── Lifetime KPIs (individual component hours, correct for lifespan) ─
-  const lifetimeKpi = ["Motor","ESC","Prop"].map(t=>({
-    label:`All ${t}s`, h:components.filter(c=>c.type===t).reduce((a,c)=>a+compHours(c.id,sessions),0)
-  }));
+    .map(c=>({name:c.name,h:compHours(c.id,sessions)}))
+    .filter(r=>r.h>0).sort((a,b)=>b.h-a.h);
 
   return (
     <div>
-      {/* Lifetime KPIs */}
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:11,marginBottom:18}}>
-        {lifetimeKpi.map(({label,h})=>(
-          <div key={label} className="kpi">
-            <div className="kpi-v">{fmtDur(h)}</div>
-            <div className="kpi-l">{label} — total hours</div>
+      {/* ── Section 1: KPI row ──────────────────────────────────── */}
+      <div className="kpi-grid" style={{marginBottom:18}}>
+        <div className="kpi">
+          <div className="kpi-v">{totalTests}</div>
+          <div className="kpi-l">Total tests</div>
+          <div className="kpi-s">All time</div>
+        </div>
+        <div className="kpi">
+          <div className="kpi-v">{monthTests}</div>
+          <div className="kpi-l">This month</div>
+          <div className="kpi-s">{weekSess.length} this week</div>
+        </div>
+        <div className="kpi">
+          <div className="kpi-v" style={{color:passRate>=80?"var(--ok)":passRate>=60?"var(--warn)":"var(--danger)"}}>
+            {passRate}%
           </div>
-        ))}
-      </div>
-
-      {/* Individual component hours — 4-column table layout */}
-      <div className="card" style={{marginBottom:18}}>
-        <div className="card-title" style={{marginBottom:16}}>Component hours — individual</div>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:24}}>
-          <CompTable title="Motors"  rows={compRows("Motor")}/>
-          <CompTable title="ESCs"    rows={compRows("ESC")}/>
-          <CompTable title="Props"   rows={compRows("Prop")}/>
-          <CompTable title="Batteries" rows={compRows("Battery")}/>
+          <div className="kpi-l">Pass rate</div>
+          <div className="kpi-s">{passCount} of {totalTests} successful</div>
+        </div>
+        <div className="kpi">
+          <div className="kpi-v">{activeDays}</div>
+          <div className="kpi-l">Active days</div>
+          <div className="kpi-s">Unique test days this month</div>
+        </div>
+        <div className="kpi">
+          <div className="kpi-v">{compsTested}</div>
+          <div className="kpi-l">Components</div>
+          <div className="kpi-s">Tested this month</div>
         </div>
       </div>
 
-      {/* Rig utilisation + outcomes + test types */}
-      <div className="chart-grid-3">
-        <StatList title="Rig utilisation"  rows={rigRows}/>
-        <StatList title="Run outcomes"     rows={aggBySess("outcome")}/>
-        <StatList title="Test types"       rows={aggBySess("test_type")}/>
+      {/* ── Section 2: Tests by type table ──────────────────────── */}
+      <div className="card" style={{marginBottom:18}}>
+        <div className="card-title" style={{marginBottom:14}}>Tests by type</div>
+        {typeRows.length===0
+          ? <div className="empty">No sessions logged yet</div>
+          : <table style={{width:"100%",borderCollapse:"collapse"}}>
+              <thead>
+                <tr>
+                  {["Test type","Total runs","Total time","This week","Week time","Pass","Fail","Pass rate"].map(h=>(
+                    <th key={h} style={{padding:"6px 8px",fontSize:9,fontWeight:700,
+                      textTransform:"uppercase",letterSpacing:".08em",color:"var(--text3)",
+                      textAlign:h==="Test type"?"left":"right",borderBottom:"1px solid var(--border)",
+                      whiteSpace:"nowrap"}}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {typeRows.map(([type,d],i)=>{
+                  const rate = d.total>0 ? Math.round((d.pass/d.total)*100) : 0;
+                  return (
+                    <tr key={i} style={{borderBottom:"0.5px solid var(--border)"}}>
+                      <td style={{padding:"9px 8px",fontSize:12,color:"var(--text)",fontWeight:500}}>{type}</td>
+                      <td style={{padding:"9px 8px",fontSize:12,textAlign:"right",fontVariantNumeric:"tabular-nums",color:"var(--text)"}}>{d.total}</td>
+                      <td style={{padding:"9px 8px",fontSize:12,textAlign:"right",fontVariantNumeric:"tabular-nums",color:"var(--text2)"}}>{fmtDur(d.totalH)}</td>
+                      <td style={{padding:"9px 8px",fontSize:12,textAlign:"right",color:d.week>0?"var(--text)":"var(--text3)"}}>{d.week||"—"}</td>
+                      <td style={{padding:"9px 8px",fontSize:12,textAlign:"right",fontVariantNumeric:"tabular-nums",color:d.weekH>0?"var(--text2)":"var(--text3)"}}>{d.weekH>0?fmtDur(d.weekH):"—"}</td>
+                      <td style={{padding:"9px 8px",fontSize:12,textAlign:"right",color:"var(--ok)",fontWeight:500}}>{d.pass}</td>
+                      <td style={{padding:"9px 8px",fontSize:12,textAlign:"right",color:d.fail>0?"var(--danger)":"var(--text3)",fontWeight:d.fail>0?500:400}}>{d.fail||"—"}</td>
+                      <td style={{padding:"9px 8px",textAlign:"right"}}>
+                        <div style={{display:"flex",alignItems:"center",gap:6,justifyContent:"flex-end"}}>
+                          <div style={{width:40,height:4,background:"var(--border)",borderRadius:2,overflow:"hidden"}}>
+                            <div style={{height:"100%",width:`${rate}%`,borderRadius:2,
+                              background:rate>=80?"var(--ok)":rate>=60?"var(--warn)":"var(--danger)"}}/>
+                          </div>
+                          <span style={{fontSize:11,fontWeight:600,color:rate>=80?"var(--ok)":rate>=60?"var(--warn)":"var(--danger)",minWidth:30,textAlign:"right"}}>{rate}%</span>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>}
+      </div>
+
+      {/* ── Section 3: Activity calendar + Outcomes ─────────────── */}
+      <div className="chart-grid-2" style={{marginBottom:18}}>
+        <div className="card">
+          <div className="card-title" style={{marginBottom:12}}>
+            Test activity — {now.toLocaleDateString("en",{month:"long",year:"numeric"})}
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:3,marginBottom:6}}>
+            {["Su","Mo","Tu","We","Th","Fr","Sa"].map(d=>(
+              <div key={d} style={{fontSize:9,textAlign:"center",color:"var(--text3)",
+                fontWeight:600,letterSpacing:".04em"}}>{d}</div>
+            ))}
+            {Array.from({length:firstDay}).map((_,i)=>(
+              <div key={"e"+i}/>
+            ))}
+            {Array.from({length:daysInMonth}).map((_,i)=>{
+              const d = i+1;
+              const dateStr = `${monStr}-${String(d).padStart(2,"0")}`;
+              const active = activeDaySet.has(dateStr);
+              const isToday = dateStr===now.toISOString().slice(0,10);
+              return (
+                <div key={d} title={active?`${dateStr}: has sessions`:""}
+                  style={{aspectRatio:"1",borderRadius:3,
+                    background:active?"var(--text)":"var(--border)",
+                    outline:isToday?"2px solid var(--text)":"none",
+                    outlineOffset:1,
+                    display:"flex",alignItems:"center",justifyContent:"center"}}>
+                  <span style={{fontSize:9,color:active?"var(--surface)":"var(--text3)",
+                    fontWeight:active?600:400}}>{d}</span>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{display:"flex",gap:12,marginTop:8}}>
+            <div style={{display:"flex",alignItems:"center",gap:5,fontSize:11,color:"var(--text2)"}}>
+              <div style={{width:10,height:10,borderRadius:2,background:"var(--text)"}}/>Active day
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:5,fontSize:11,color:"var(--text2)"}}>
+              <div style={{width:10,height:10,borderRadius:2,background:"var(--border)"}}/>No test
+            </div>
+          </div>
+        </div>
+
+        <div className="card">
+          <div className="card-title" style={{marginBottom:12}}>Run outcomes</div>
+          {outRows.length===0
+            ? <div className="empty">No data</div>
+            : outRows.map(([outcome,count],i)=>{
+                const pct = Math.round((count/totalTests)*100);
+                const color = OUT_COLORS[outcome]||"#888";
+                return (
+                  <div key={i} style={{marginBottom:14}}>
+                    <div style={{display:"flex",justifyContent:"space-between",
+                      alignItems:"center",marginBottom:4}}>
+                      <div style={{display:"flex",alignItems:"center",gap:7}}>
+                        <div style={{width:8,height:8,borderRadius:1,background:color,flexShrink:0}}/>
+                        <span style={{fontSize:13,color:"var(--text)"}}>{outcome}</span>
+                      </div>
+                      <div style={{display:"flex",alignItems:"center",gap:8}}>
+                        <span style={{fontSize:18,fontWeight:600,color,fontVariantNumeric:"tabular-nums"}}>{count}</span>
+                        <span style={{fontSize:11,color:"var(--text3)",minWidth:30,textAlign:"right"}}>{pct}%</span>
+                      </div>
+                    </div>
+                    <div style={{height:4,background:"var(--border)",borderRadius:2,overflow:"hidden"}}>
+                      <div style={{height:"100%",width:`${pct}%`,background:color,borderRadius:2}}/>
+                    </div>
+                  </div>
+                );
+              })}
+        </div>
+      </div>
+
+      {/* ── Section 4: Component hours ──────────────────────────── */}
+      <div className="card">
+        <div className="card-title" style={{marginBottom:16}}>Component hours — individual</div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:24}}>
+          <CompTable title="Motors"    rows={compRows("Motor")}/>
+          <CompTable title="ESCs"      rows={compRows("ESC")}/>
+          <CompTable title="Props"     rows={compRows("Prop")}/>
+          <CompTable title="Batteries" rows={compRows("Battery")}/>
+        </div>
       </div>
     </div>
   );
@@ -1804,7 +1905,7 @@ function PageLogEvents({ data, save, toast }) {
 // PAGE: SETTINGS
 // ═══════════════════════════════════════════════════════════════════
 function PageSettings({ data, save, toast, cfg, saveCfg, sync, onRefresh }) {
-  const [proxyUrl, setProxyUrl]=useState(cfg.proxyUrl||"");
+  const [proxyUrl, setProxyUrl]=useState(cfg.proxyUrl||DEFAULT_PROXY);
 
   const saveCfgLocal=()=>{
     saveCfg({...cfg,proxyUrl});
