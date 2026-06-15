@@ -531,16 +531,31 @@ function App() {
   const [theme,    setTheme]   = useState(() => localStorage.getItem("tbTheme")||"light");
   const [page,     setPage]    = useState("Overview");
   const [mobOpen,  setMobOpen] = useState(false);
-  // ── Global live timer state (lifted so it persists across tab switches) ──
-  const [timerRunning, setTimerRunning] = useState(false);
-  const [timerPaused,  setTimerPaused]  = useState(false);
-  const [timerSecs,    setTimerSecs]    = useState(0);
-  const [timerSide,    setTimerSide]    = useState("Side A");
-  const globalTick = useRef(null);
+  // ── Global live timer state ───────────────────────────────────────
+  // Uses start timestamp instead of interval counter so mobile browsers
+  // can't throttle it — elapsed time is always Date.now() - startTime
+  const [timerRunning,  setTimerRunning]  = useState(false);
+  const [timerPaused,   setTimerPaused]   = useState(false);
+  const [timerSecs,     setTimerSecs]     = useState(0);
+  const [timerSide,     setTimerSide]     = useState("Side A");
+  const timerStartRef   = useRef(null);  // timestamp when timer last started/resumed
+  const timerBaseRef    = useRef(0);     // accumulated secs before last pause
+  const globalTick      = useRef(null);
+
   useEffect(()=>{
-    if(timerRunning&&!timerPaused){
-      globalTick.current=setInterval(()=>setTimerSecs(s=>s+1),1000);
-    } else clearInterval(globalTick.current);
+    if(timerRunning && !timerPaused){
+      timerStartRef.current = Date.now();
+      globalTick.current = setInterval(()=>{
+        const elapsed = Math.floor((Date.now() - timerStartRef.current) / 1000);
+        setTimerSecs(timerBaseRef.current + elapsed);
+      }, 500); // update twice/sec for accuracy
+    } else {
+      clearInterval(globalTick.current);
+      if(timerRunning && timerPaused){
+        // Save accumulated time when pausing
+        timerBaseRef.current = timerSecs;
+      }
+    }
     return ()=>clearInterval(globalTick.current);
   },[timerRunning,timerPaused]);
   const [data,     setData]    = useState(null);
@@ -783,7 +798,8 @@ function App() {
                                            timerRunning={timerRunning} setTimerRunning={setTimerRunning}
                                            timerPaused={timerPaused}   setTimerPaused={setTimerPaused}
                                            timerSecs={timerSecs}       setTimerSecs={setTimerSecs}
-                                           timerSide={timerSide}       setTimerSide={setTimerSide}/>}
+                                           timerSide={timerSide}       setTimerSide={setTimerSide}
+                                           timerBaseRef={timerBaseRef}/>}
                 {page==="Log book"          && <PageLogBook      data={data} save={save} toast={showToast}/>}
                 {page==="Components"        && <PageComponents   data={data} save={save} toast={showToast}/>}
                 {page==="Rig configuration" && <PageRigConfig    data={data} save={save} toast={showToast}/>}
@@ -1032,19 +1048,36 @@ function PageDashboard({ data, timerRunning, timerPaused, timerSecs, timerSide }
   const compsTested= new Set(monSess.flatMap(s=>s.components||[])).size;
 
   // ── Run time by setup (no double-counting) ────────────────────────
+  // For "Both" side sessions, split into two setups using rig config
   const setupMap = {};
+  const addSetup = (key, hours) => { setupMap[key]=(setupMap[key]||0)+hours; };
+
   sessions.forEach(s=>{
-    let mo="—",es="—",pr="—";
-    (s.components||[]).forEach(cid=>{
-      const c=components.find(x=>x.id===cid);
-      if(!c) return;
-      const b=brandOf(c.name);
-      if(c.type==="Motor") mo=b;
-      else if(c.type==="ESC"&&es==="—") es=b;
-      else if(c.type==="Prop"&&pr==="—") pr=b;
-    });
-    const k=`${mo} / ${es} / ${pr}`;
-    setupMap[k]=(setupMap[k]||0)+(s.hours||0);
+    const side = s.side||"";
+    const hrs  = s.hours||0;
+
+    if (side==="Both" && (data.rig_side_a||{}).Motor && (data.rig_side_b||{}).Motor) {
+      // Split into two setups using rig config
+      ["rig_side_a","rig_side_b"].forEach(key=>{
+        const cfg = data[key]||{};
+        const mo = brandOf(cfg.Motor||"") || "—";
+        const es = brandOf(cfg.ESC||"")   || "—";
+        const pr = brandOf(cfg.Prop||"")  || "—";
+        addSetup(`${mo} / ${es} / ${pr}`, hrs);
+      });
+    } else {
+      // Single side — pick components from session
+      let mo="—",es="—",pr="—";
+      (s.components||[]).forEach(cid=>{
+        const c=components.find(x=>x.id===cid);
+        if(!c) return;
+        const b=brandOf(c.name);
+        if(c.type==="Motor"&&mo==="—") mo=b;
+        else if(c.type==="ESC"&&es==="—") es=b;
+        else if(c.type==="Prop"&&pr==="—") pr=b;
+      });
+      addSetup(`${mo} / ${es} / ${pr}`, hrs);
+    }
   });
   const topSetups = Object.entries(setupMap).sort((a,b)=>b[1]-a[1]).slice(0,6);
 
@@ -1474,7 +1507,7 @@ function PageLogPast({ data, save, toast }) {
 // ═══════════════════════════════════════════════════════════════════
 function PageLiveTimer({ data, save, toast,
   timerRunning, setTimerRunning, timerPaused, setTimerPaused,
-  timerSecs, setTimerSecs, timerSide, setTimerSide }) {
+  timerSecs, setTimerSecs, timerSide, setTimerSide, timerBaseRef }) {
   const { sessions=[], components=[] } = data;
   const [manSel,  setManSel] = useState([]);
   const [phase,   setPhase]  = useState("timer");
@@ -1523,6 +1556,7 @@ function PageLiveTimer({ data, save, toast,
     if (ok !== false) {
       toast("Run saved");
       setTimerSecs(0); setStoppedSecs(0);
+      timerBaseRef.current = 0;
       setPhase("timer"); setIssues(""); setSname(""); setTtype(""); setOutcome("Success");
     }
   };
@@ -1530,6 +1564,7 @@ function PageLiveTimer({ data, save, toast,
   const discardRun = () => {
     setTimerSecs(0); setStoppedSecs(0); setPhase("timer");
     setTimerRunning(false); setTimerPaused(false);
+    timerBaseRef.current = 0;
   };
 
   if (phase === "review") return (
@@ -1613,7 +1648,7 @@ function PageLiveTimer({ data, save, toast,
           {!running
             ? <button className="btn btn-p"
                 disabled={sideCmps.length===0}
-                onClick={()=>{setTimerRunning(true);setTimerPaused(false);}}>
+                onClick={()=>{timerBaseRef.current=0;setTimerSecs(0);setTimerRunning(true);setTimerPaused(false);}}>
                 Start
               </button>
             : <>
