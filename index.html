@@ -532,32 +532,83 @@ function App() {
   const [page,     setPage]    = useState("Overview");
   const [mobOpen,  setMobOpen] = useState(false);
   // ── Global live timer state ───────────────────────────────────────
-  // Uses start timestamp instead of interval counter so mobile browsers
-  // can't throttle it — elapsed time is always Date.now() - startTime
+  // Timestamp-based: immune to mobile throttling and screen lock.
+  // On page resume (visibility change), recalculates from stored start time.
   const [timerRunning,  setTimerRunning]  = useState(false);
   const [timerPaused,   setTimerPaused]   = useState(false);
   const [timerSecs,     setTimerSecs]     = useState(0);
   const [timerSide,     setTimerSide]     = useState("Side A");
-  const timerStartRef   = useRef(null);  // timestamp when timer last started/resumed
-  const timerBaseRef    = useRef(0);     // accumulated secs before last pause
-  const globalTick      = useRef(null);
+  const timerStartRef = useRef(null); // wall-clock ms when timer last started/resumed
+  const timerBaseRef  = useRef(0);    // accumulated secs before last pause
+  const globalTick    = useRef(null);
+  const timerRunRef   = useRef(false); // ref copy for visibility handler
+
+  const recalc = useCallback(() => {
+    if (timerRunRef.current && timerStartRef.current) {
+      const elapsed = Math.floor((Date.now() - timerStartRef.current) / 1000);
+      setTimerSecs(timerBaseRef.current + elapsed);
+    }
+  }, []);
+
+  useEffect(()=>{ timerRunRef.current = timerRunning && !timerPaused; }, [timerRunning, timerPaused]);
 
   useEffect(()=>{
     if(timerRunning && !timerPaused){
       timerStartRef.current = Date.now();
-      globalTick.current = setInterval(()=>{
-        const elapsed = Math.floor((Date.now() - timerStartRef.current) / 1000);
-        setTimerSecs(timerBaseRef.current + elapsed);
-      }, 500); // update twice/sec for accuracy
+      globalTick.current = setInterval(recalc, 500);
     } else {
       clearInterval(globalTick.current);
       if(timerRunning && timerPaused){
-        // Save accumulated time when pausing
         timerBaseRef.current = timerSecs;
       }
     }
     return ()=>clearInterval(globalTick.current);
-  },[timerRunning,timerPaused]);
+  },[timerRunning, timerPaused]);
+
+  // Page Visibility API — recalculate when phone screen wakes up
+  useEffect(()=>{
+    const onVisible = () => { if(!document.hidden) recalc(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return ()=>document.removeEventListener("visibilitychange", onVisible);
+  },[recalc]);
+
+  // ── Live status writer — pushes to Sheets A2 every 30s while running ──
+  useEffect(()=>{
+    if(!timerRunning || timerPaused) return;
+    const pushLive = async () => {
+      const freshCfg = (()=>{try{return JSON.parse(localStorage.getItem("tbCfg")||"{}");}catch{return {};}})();
+      const proxy = freshCfg.proxyUrl || DEFAULT_PROXY;
+      const livePayload = JSON.stringify({
+        live: true,
+        secs: timerBaseRef.current + Math.floor((Date.now()-timerStartRef.current)/1000),
+        side: timerSide,
+        started: timerStartRef.current
+      });
+      try {
+        await fetch(proxy, {
+          method:"POST", mode:"no-cors",
+          headers:{"Content-Type":"text/plain"},
+          body: JSON.stringify({ sheetId:SHEET_ID, liveData: livePayload, pin:OP_PASS })
+        });
+      } catch(e) {}
+    };
+    pushLive(); // push immediately on start
+    const liveInterval = setInterval(pushLive, 30000);
+    return ()=>clearInterval(liveInterval);
+  },[timerRunning, timerPaused, timerSide]);
+
+  // Clear live status when timer stops
+  useEffect(()=>{
+    if(!timerRunning){
+      const freshCfg=(()=>{try{return JSON.parse(localStorage.getItem("tbCfg")||"{}");}catch{return {};}})();
+      const proxy=freshCfg.proxyUrl||DEFAULT_PROXY;
+      const clearPayload=JSON.stringify({live:false});
+      fetch(proxy,{method:"POST",mode:"no-cors",
+        headers:{"Content-Type":"text/plain"},
+        body:JSON.stringify({sheetId:SHEET_ID,liveData:clearPayload,pin:OP_PASS})
+      }).catch(()=>{});
+    }
+  },[timerRunning]);
   const [data,     setData]    = useState(null);
   const [sync,     setSync]    = useState("busy");
   const [toast,    setToast]   = useState(null);
@@ -2165,6 +2216,18 @@ function doGet(e) {
       return makeResponse("{}");
     }
   }
+  // Live status read — for Base44 integration
+  if (params.action === "live") {
+    try {
+      var ss    = SpreadsheetApp.openById(params.sheetId);
+      var sheet = ss.getSheetByName("bench_data");
+      if (!sheet) return makeResponse(JSON.stringify({live:false}));
+      var liveVal = sheet.getRange("A2").getValue();
+      return makeResponse(liveVal || JSON.stringify({live:false}));
+    } catch(err) {
+      return makeResponse(JSON.stringify({live:false}));
+    }
+  }
   return makeResponse("{}");
 }
 
@@ -2178,7 +2241,14 @@ function doPost(e) {
     var ss    = SpreadsheetApp.openById(body.sheetId);
     var sheet = ss.getSheetByName("bench_data")
                 || ss.insertSheet("bench_data");
-    sheet.getRange("A1").setValue(body.data);
+    // Main data write
+    if (body.data) {
+      sheet.getRange("A1").setValue(body.data);
+    }
+    // Live timer status write (A2) — for Base44 integration
+    if (body.liveData !== undefined) {
+      sheet.getRange("A2").setValue(body.liveData);
+    }
     return makeResponse("ok");
   } catch(err) {
     return makeResponse("error: " + err.message);
